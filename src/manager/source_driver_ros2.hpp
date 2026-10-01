@@ -26,6 +26,8 @@
  * Author: Zhang Yu <zhangyu@hesaitech.com>
  * Description: Source Driver for ROS2
  * Created on June 12, 2023, 10:46 AM
+ * 
+ * Modified by DIMAAG-AI.
  */
 
 #pragma once
@@ -53,7 +55,8 @@ class SourceDriver
 public:
   typedef std::shared_ptr<SourceDriver> Ptr;
   // Initialize some necessary configuration parameters, create ROS nodes, and register callback functions
-  virtual void Init(const YAML::Node& config);
+  // If external_node is provided, publishers/subscribers are created on that node instead of an internal one.
+  virtual void Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> external_node = nullptr);
   // Start working
   virtual void Start();
   // Stop working
@@ -93,7 +96,7 @@ protected:
   // Convert double[512] to float64[512]
   hesai_ros_driver::msg::Firetime ToRosMsg(const double *firetime_correction_);
   // Convert point clouds into ROS messages
-  sensor_msgs::msg::PointCloud2 ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id);
+  std::unique_ptr<sensor_msgs::msg::PointCloud2> ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id);
   // Convert packets into ROS messages
   hesai_ros_driver::msg::UdpFrame ToRosMsg(const UdpFrame_t& ros_msg, double timestamp);
   hesai_ros_driver::msg::UdpPacket ToRosMsg(const UdpPacket& ros_msg, double timestamp);
@@ -119,14 +122,18 @@ protected:
   //spin thread while Receive data from ROS topic
   boost::thread* subscription_spin_thread_;
 };
-inline void SourceDriver::Init(const YAML::Node& config)
+inline void SourceDriver::Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> external_node)
 {
   DriverParam driver_param;
   DriveYamlParam yaml_param;
   yaml_param.GetDriveYamlParam(config, driver_param);
   frame_id_ = driver_param.input_param.frame_id;
 
-  node_ptr_.reset(new rclcpp::Node("hesai_ros_driver_node"));
+  if (external_node) {
+    node_ptr_ = external_node;
+  } else {
+    node_ptr_.reset(new rclcpp::Node("hesai_ros_driver_node"));
+  }
   if (driver_param.input_param.send_point_cloud_ros) {
     pub_ = node_ptr_->create_publisher<sensor_msgs::msg::PointCloud2>(driver_param.input_param.ros_send_point_topic, 10);
   }
@@ -169,7 +176,11 @@ inline void SourceDriver::Init(const YAML::Node& config)
                               std::bind(&SourceDriver::ReceiveCorrection, this, std::placeholders::_1));
     }
     driver_param.decoder_param.enable_udp_thread = false;
-    subscription_spin_thread_ = new boost::thread(boost::bind(&SourceDriver::SpinRos2,this));
+    // Only spin a separate thread if node_ptr_ is an internal node (not the composable node,
+    // which is already being spun by the component container)
+    if (!external_node) {
+      subscription_spin_thread_ = new boost::thread(boost::bind(&SourceDriver::SpinRos2,this));
+    }
   }
   driver_ptr_.reset(new HesaiLidarSdk<LidarPointXYZIRT>());
   driver_param.decoder_param.enable_parser_thread = true;
@@ -227,7 +238,8 @@ inline void SourceDriver::SendPacket(const UdpFrame_t& msg, double timestamp)
 
 inline void SourceDriver::SendPointCloud(const LidarDecodedFrame<LidarPointXYZIRT>& msg)
 {
-  pub_->publish(ToRosMsg(msg, frame_id_));
+  auto out_cloud = ToRosMsg(msg, frame_id_);
+  pub_->publish(std::move(out_cloud)); 
 }
 
 inline void SourceDriver::SendCorrection(const u8Array_t& msg)
@@ -254,9 +266,9 @@ inline void SourceDriver::SendPacketOneByOne(const UdpPacket& msg, double timest
 {
   every_pkt_pub_->publish(ToRosMsg(msg, timestamp));
 }
-inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id)
+inline std::unique_ptr<sensor_msgs::msg::PointCloud2> SourceDriver::ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id)
 {
-  sensor_msgs::msg::PointCloud2 ros_msg;
+  auto ros_msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
   uint32_t points_number = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.points_num : frame.multi_points_num;
   uint32_t packet_number = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.packet_num : frame.multi_packet_num;
   LidarPointXYZIRT *pPoints = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.points : frame.multi_points;
@@ -265,30 +277,30 @@ inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFr
   double frame_end_timestamp = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_end_timestamp : frame.multi_frame_end_timestamp;
   const char *prefix = (frame.fParam.IsMultiFrameFrequency() == 0) ? "raw" : "multi";
   int fields = 6;
-  ros_msg.fields.clear();
-  ros_msg.fields.reserve(fields);
-  ros_msg.width = points_number; 
-  ros_msg.height = 1; 
+  ros_msg->fields.clear();
+  ros_msg->fields.reserve(fields);
+  ros_msg->width = points_number; 
+  ros_msg->height = 1; 
 
   int offset = 0;
-  offset = addPointField(ros_msg, "x", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(ros_msg, "y", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(ros_msg, "z", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(ros_msg, "intensity", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(ros_msg, "ring", 1, sensor_msgs::msg::PointField::UINT16, offset);
-  offset = addPointField(ros_msg, "timestamp", 1, sensor_msgs::msg::PointField::FLOAT64, offset);
+  offset = addPointField(*ros_msg, "x", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
+  offset = addPointField(*ros_msg, "y", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
+  offset = addPointField(*ros_msg, "z", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
+  offset = addPointField(*ros_msg, "intensity", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
+  offset = addPointField(*ros_msg, "ring", 1, sensor_msgs::msg::PointField::UINT16, offset);
+  offset = addPointField(*ros_msg, "timestamp", 1, sensor_msgs::msg::PointField::FLOAT64, offset);
 
-  ros_msg.point_step = offset;
-  ros_msg.row_step = ros_msg.width * ros_msg.point_step;
-  ros_msg.is_dense = false;
-  ros_msg.data.resize(points_number * ros_msg.point_step);
+  ros_msg->point_step = offset;
+  ros_msg->row_step = ros_msg->width * ros_msg->point_step;
+  ros_msg->is_dense = false;
+  ros_msg->data.resize(points_number * ros_msg->point_step);
 
-  sensor_msgs::PointCloud2Iterator<float> iter_x_(ros_msg, "x");
-  sensor_msgs::PointCloud2Iterator<float> iter_y_(ros_msg, "y");
-  sensor_msgs::PointCloud2Iterator<float> iter_z_(ros_msg, "z");
-  sensor_msgs::PointCloud2Iterator<float> iter_intensity_(ros_msg, "intensity");
-  sensor_msgs::PointCloud2Iterator<uint16_t> iter_ring_(ros_msg, "ring");
-  sensor_msgs::PointCloud2Iterator<double> iter_timestamp_(ros_msg, "timestamp");
+  sensor_msgs::PointCloud2Iterator<float> iter_x_(*ros_msg, "x");
+  sensor_msgs::PointCloud2Iterator<float> iter_y_(*ros_msg, "y");
+  sensor_msgs::PointCloud2Iterator<float> iter_z_(*ros_msg, "z");
+  sensor_msgs::PointCloud2Iterator<float> iter_intensity_(*ros_msg, "intensity");
+  sensor_msgs::PointCloud2Iterator<uint16_t> iter_ring_(*ros_msg, "ring");
+  sensor_msgs::PointCloud2Iterator<double> iter_timestamp_(*ros_msg, "timestamp");
   for (size_t i = 0; i < points_number; i++)
   {
     LidarPointXYZIRT point = pPoints[i];
@@ -310,12 +322,16 @@ inline sensor_msgs::msg::PointCloud2 SourceDriver::ToRosMsg(const LidarDecodedFr
   std::cout.flush();
   auto sec = (uint64_t)floor(frame_start_timestamp);
   if (sec <= std::numeric_limits<int32_t>::max()) {
-    ros_msg.header.stamp.sec = (uint32_t)floor(frame_start_timestamp);
-    ros_msg.header.stamp.nanosec = (uint32_t)round((frame_start_timestamp - ros_msg.header.stamp.sec) * 1e9);
+    ros_msg->header.stamp.sec = (uint32_t)floor(frame_start_timestamp);
+    ros_msg->header.stamp.nanosec = (uint32_t)round((frame_start_timestamp - ros_msg->header.stamp.sec) * 1e9);
   } else {
     printf("does not support timestamps greater than 19 January 2038 03:14:07 (now %lf)\n", frame_start_timestamp);
   }
-  ros_msg.header.frame_id = frame_id_;
+  ros_msg->header.frame_id = frame_id_;
+  auto current_time = rclcpp::Clock().now();
+  ros_msg->header.stamp = current_time;
+  auto logger = rclcpp::get_logger("SourceDriver");
+  RCLCPP_INFO(logger, "Publisher heap address: %p", (void*)ros_msg.get());
   return ros_msg;
 }
 
@@ -428,3 +444,4 @@ inline void SourceDriver::ReceiveCorrection(const std_msgs::msg::UInt8MultiArray
 // {
 //   return degree * M_PI / 180.0;
 // }
+
