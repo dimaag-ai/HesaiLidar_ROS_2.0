@@ -1,447 +1,315 @@
-/************************************************************************************************
-  Copyright(C)2023 Hesai Technology Co., Ltd.
-  All code in this repository is released under the terms of the following [Modified BSD License.]
-  Modified BSD License:
-  Redistribution and use in source and binary forms,with or without modification,are permitted 
-  provided that the following conditions are met:
-  *Redistributions of source code must retain the above copyright notice,this list of conditions 
-   and the following disclaimer.
-  *Redistributions in binary form must reproduce the above copyright notice,this list of conditions and 
-   the following disclaimer in the documentation and/or other materials provided with the distribution.
-  *Neither the names of the University of Texas at Austin,nor Austin Robot Technology,nor the names of 
-   other contributors maybe used to endorse or promote products derived from this software without 
-   specific prior written permission.
-  THIS SOFTWARE IS PROVIDED BY THE COPYRIGH THOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED 
-  WARRANTIES,INCLUDING,BUT NOT LIMITED TO,THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A 
-  PARTICULAR PURPOSE ARE DISCLAIMED.IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR 
-  ANY DIRECT,INDIRECT,INCIDENTAL,SPECIAL,EXEMPLARY,OR CONSEQUENTIAL DAMAGES(INCLUDING,BUT NOT LIMITED TO,
-  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;LOSS OF USE,DATA,OR PROFITS;OR BUSINESS INTERRUPTION)HOWEVER 
-  CAUSED AND ON ANY THEORY OF LIABILITY,WHETHER IN CONTRACT,STRICT LIABILITY,OR TORT(INCLUDING NEGLIGENCE 
-  OR OTHERWISE)ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,EVEN IF ADVISED OF THE POSSIBILITY OF 
-  SUCHDAMAGE.
-************************************************************************************************/
+cmake_minimum_required(VERSION 3.5)
+cmake_policy(SET CMP0048 NEW)
+project(hesai_ros_driver)
 
-/*
- * File: source_driver_ros2.hpp
- * Author: Zhang Yu <zhangyu@hesaitech.com>
- * Description: Source Driver for ROS2
- * Created on June 12, 2023, 10:46 AM
- * 
- * Modified by DIMAAG-AI.
- */
+#=======================================
+# Version information
+#=======================================
+set(VERSION_MAJOR 2)
+set(VERSION_MINOR 0)
+set(VERSION_TINY  12)
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/Version.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/Version.h"
+)
 
-#pragma once
-#include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/point_cloud2_iterator.hpp>
-#include <std_msgs/msg/u_int8_multi_array.hpp>
-#include <sensor_msgs/msg/imu.hpp>
-#include <sstream>
-#include <hesai_ros_driver/msg/udp_frame.hpp>
-#include <hesai_ros_driver/msg/udp_packet.hpp>
-#include <hesai_ros_driver/msg/ptp.hpp>
-#include <hesai_ros_driver/msg/firetime.hpp>
-#include <hesai_ros_driver/msg/loss_packet.hpp>
+set(WITH_PTCS_USE ON CACHE BOOL "Use Ptcs")
+# set(FIND_CUDA ON CACHE BOOL "Find CUDA")
 
-#include <fstream>
-#include <memory>
-#include <chrono>
-#include <string>
-#include <functional>
-#include <boost/thread.hpp>
-#include "source_drive_common.hpp"
+if(FIND_CUDA)
+    find_package(CUDA )
+endif()
+if(${CUDA_FOUND})
+  	project(CommonModules LANGUAGES CXX CUDA)
+	set(CUDA_SOURCE_PROPERTY_FORMAT OBJ)
+	set(CUDA_SEPARABLE_COMPILATION ON)
+	include_directories(${CUDA_INCLUDE_DIRS})
+	set(CUDA_PROPAGATE_HOST_FLAGS OFF)
+	set(CUDA_NVCC_FLAGS -arch=sm_61;-O3;-G;-g;)#根据具体GPU性能更改算力参数
+	link_directories($ENV{CUDA_PATH}/lib/x64)
 
-class SourceDriver
-{
-public:
-  typedef std::shared_ptr<SourceDriver> Ptr;
-  // Initialize some necessary configuration parameters, create ROS nodes, and register callback functions
-  // If external_node is provided, publishers/subscribers are created on that node instead of an internal one.
-  virtual void Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> external_node = nullptr);
-  // Start working
-  virtual void Start();
-  // Stop working
-  virtual void Stop();
-  virtual ~SourceDriver();
-  SourceDriver(SourceType src_type) {};
-  void SpinRos2(){rclcpp::spin(this->node_ptr_);}
-  std::shared_ptr<rclcpp::Node> node_ptr_;
-  std::shared_ptr<HesaiLidarSdk<LidarPointXYZIRT>> driver_ptr_;
-protected:
-  // Save Correction file subscribed by "ros_recv_correction_topic"
-  void ReceiveCorrection(const std_msgs::msg::UInt8MultiArray::SharedPtr msg);
-  // Save packets subscribed by 'ros_recv_packet_topic'
-  void ReceivePacket(const hesai_ros_driver::msg::UdpFrame::SharedPtr msg);
-  // Used to publish point clouds through 'ros_send_point_cloud_topic'
-  void SendPointCloud(const LidarDecodedFrame<LidarPointXYZIRT>& msg);
-  // Used to publish the original packet through 'ros_send_packet_topic'
-  void SendPacket(const UdpFrame_t& ros_msg, double timestamp);
+  add_definitions(-DUSE_CUDA)
+  set(FIND_CUDA ON CACHE BOOL "Use Cuda")
+else(${CUDA_FOUND})
+	MESSAGE(STATUS "cuda not found!")
+endif(${CUDA_FOUND})
 
-  // Used to publish the Correction file through 'ros_send_correction_topic'
-  void SendCorrection(const u8Array_t& msg);
-  // Used to publish the Packet loss condition
-  void SendPacketLoss(const uint32_t& total_packet_count, const uint32_t& total_packet_loss_count);
-  // Used to publish the Packet loss condition
-  void SendPTP(const uint8_t& ptp_lock_offset, const u8Array_t& ptp_status);
-  // Used to publish the imu packet
-  void SendImuConfig(const LidarImuData& msg);
-  // Publish raw data packets, sending them one by one
-  void SendPacketOneByOne(const UdpPacket& ros_msg, double timestamp);
+#=======================================
+# Custom Point Type (XYZI, XYZIRT)
+#=======================================
+set(POINT_TYPE XYZI)
 
-  // Convert ptp lock offset, status into ROS message
-  hesai_ros_driver::msg::Ptp ToRosMsg(const uint8_t& ptp_lock_offset, const u8Array_t& ptp_status);
-  // Convert packet loss condition into ROS message
-  hesai_ros_driver::msg::LossPacket ToRosMsg(const uint32_t& total_packet_count, const uint32_t& total_packet_loss_count);
-  // Convert correction string into ROS messages
-  std_msgs::msg::UInt8MultiArray ToRosMsg(const u8Array_t& correction_string);
-  // Convert double[512] to float64[512]
-  hesai_ros_driver::msg::Firetime ToRosMsg(const double *firetime_correction_);
-  // Convert point clouds into ROS messages
-  std::unique_ptr<sensor_msgs::msg::PointCloud2> ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id);
-  // Convert packets into ROS messages
-  hesai_ros_driver::msg::UdpFrame ToRosMsg(const UdpFrame_t& ros_msg, double timestamp);
-  hesai_ros_driver::msg::UdpPacket ToRosMsg(const UdpPacket& ros_msg, double timestamp);
-  // Convert imu, imu into ROS message
-  sensor_msgs::msg::Imu ToRosMsg(const LidarImuData& firetime_correction_);
-  // Convert Linear Acceleration from g to m/s^2
-  // double From_g_To_ms2(double g);
-  // Convert Angular Velocity from degree/s to radian/s
-  // double From_degs_To_rads(double degree);
-  std::string frame_id_;
+#=======================================
+# Compile setup (ORIGINAL, CATKIN, COLCON)
+#=======================================
+message(=============================================================)
+message("-- ROS_VERSION is $ENV{ROS_VERSION}")
+message(=============================================================)
 
-  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr crt_sub_;
-  rclcpp::Subscription<hesai_ros_driver::msg::UdpFrame>::SharedPtr pkt_sub_;
-  rclcpp::Publisher<hesai_ros_driver::msg::UdpFrame>::SharedPtr pkt_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_;
-  rclcpp::Publisher<hesai_ros_driver::msg::Firetime>::SharedPtr firetime_pub_;
-  rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr crt_pub_;
-  rclcpp::Publisher<hesai_ros_driver::msg::LossPacket>::SharedPtr loss_pub_;
-  rclcpp::Publisher<hesai_ros_driver::msg::Ptp>::SharedPtr ptp_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
-  rclcpp::Publisher<hesai_ros_driver::msg::UdpPacket>::SharedPtr every_pkt_pub_;
 
-  //spin thread while Receive data from ROS topic
-  boost::thread* subscription_spin_thread_;
-};
-inline void SourceDriver::Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> external_node)
-{
-  DriverParam driver_param;
-  DriveYamlParam yaml_param;
-  yaml_param.GetDriveYamlParam(config, driver_param);
-  frame_id_ = driver_param.input_param.frame_id;
+#========================
+# Project details / setup
+#========================
+set(PROJECT_NAME hesai_ros_driver)
 
-  if (external_node) {
-    node_ptr_ = external_node;
-  } else {
-    node_ptr_.reset(new rclcpp::Node("hesai_ros_driver_node"));
-  }
-  if (driver_param.input_param.send_point_cloud_ros) {
-    pub_ = node_ptr_->create_publisher<sensor_msgs::msg::PointCloud2>(driver_param.input_param.ros_send_point_topic, 10);
-  }
-  if (driver_param.input_param.send_imu_ros) {
-    int imu_queue_size = 20;
-    if (driver_param.input_param.source_type == DATA_FROM_PCAP || driver_param.input_param.source_type == DATA_FROM_ROS_PACKET) {
-      imu_queue_size = 200;
-    }
-    imu_pub_ = node_ptr_->create_publisher<sensor_msgs::msg::Imu>(driver_param.input_param.ros_send_imu_topic, imu_queue_size);
-  }
+add_definitions(-DPROJECT_PATH="${PROJECT_SOURCE_DIR}")
 
-  if (driver_param.input_param.ros_send_packet_loss_topic != NULL_TOPIC) {
-    loss_pub_ = node_ptr_->create_publisher<hesai_ros_driver::msg::LossPacket>(driver_param.input_param.ros_send_packet_loss_topic, 10);
-  }
+if (CMAKE_BUILD_TYPE STREQUAL "")
+  set(CMAKE_BUILD_TYPE Release)
+  add_definitions(-O3)
+endif()
 
-  rclcpp::QoS qos_settings(10);
-  qos_settings.transient_local();
-  if (driver_param.input_param.source_type == DATA_FROM_LIDAR) {
-    if (driver_param.input_param.ros_send_ptp_topic != NULL_TOPIC) {
-      ptp_pub_ = node_ptr_->create_publisher<hesai_ros_driver::msg::Ptp>(driver_param.input_param.ros_send_ptp_topic, qos_settings);
-    }
+if(($ENV{ROS_DISTRO} STREQUAL "rolling"))
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+elseif(($ENV{ROS_DISTRO} STREQUAL "kilted"))
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+elseif(($ENV{ROS_DISTRO} STREQUAL "jazzy"))
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+elseif($ENV{ROS_DISTRO} STREQUAL "humble")  # the ros2 humble requires c++17
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+else()
+add_definitions(-std=c++14)
+endif()
 
-    if (driver_param.input_param.ros_send_correction_topic != NULL_TOPIC) {
-      crt_pub_ = node_ptr_->create_publisher<std_msgs::msg::UInt8MultiArray>(driver_param.input_param.ros_send_correction_topic, qos_settings);
-    }
-  }
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:C>:-Wall>)
 
-  if (driver_param.input_param.send_packet_ros) {
-    pkt_pub_ = node_ptr_->create_publisher<hesai_ros_driver::msg::UdpFrame>(driver_param.input_param.ros_send_packet_topic, 10);
-  }
-  if (driver_param.input_param.ros_send_every_packet_topic != NULL_TOPIC) {
-    every_pkt_pub_ = node_ptr_->create_publisher<hesai_ros_driver::msg::UdpPacket>(driver_param.input_param.ros_send_every_packet_topic, 10);
-  }
+#========================
+# Dependencies Setup
+#========================
 
-  if (driver_param.input_param.source_type == DATA_FROM_ROS_PACKET) {
-    pkt_sub_ = node_ptr_->create_subscription<hesai_ros_driver::msg::UdpFrame>(driver_param.input_param.ros_recv_packet_topic, 10, 
-                              std::bind(&SourceDriver::ReceivePacket, this, std::placeholders::_1));
-    if (driver_param.input_param.ros_recv_correction_topic != NULL_TOPIC) {    
-      crt_sub_ = node_ptr_->create_subscription<std_msgs::msg::UInt8MultiArray>(driver_param.input_param.ros_recv_correction_topic, 10, 
-                              std::bind(&SourceDriver::ReceiveCorrection, this, std::placeholders::_1));
-    }
-    driver_param.decoder_param.enable_udp_thread = false;
-    // Only spin a separate thread if node_ptr_ is an internal node (not the composable node,
-    // which is already being spun by the component container)
-    if (!external_node) {
-      subscription_spin_thread_ = new boost::thread(boost::bind(&SourceDriver::SpinRos2,this));
-    }
-  }
-  driver_ptr_.reset(new HesaiLidarSdk<LidarPointXYZIRT>());
-  driver_param.decoder_param.enable_parser_thread = true;
-  if (driver_param.input_param.send_point_cloud_ros) {
-    driver_ptr_->RegRecvCallback([this](const hesai::lidar::LidarDecodedFrame<hesai::lidar::LidarPointXYZIRT>& frame) {  
-      this->SendPointCloud(frame);  
-    });  
-  }
-  if (driver_param.input_param.send_imu_ros) {
-    driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendImuConfig, this, std::placeholders::_1));
-  }
-  if (driver_param.input_param.send_packet_ros) {
-    driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendPacket, this, std::placeholders::_1, std::placeholders::_2)) ;
-  }
-  if (driver_param.input_param.ros_send_every_packet_topic != NULL_TOPIC) {
-    driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendPacketOneByOne, this, std::placeholders::_1, std::placeholders::_2));
-  }
-  if (driver_param.input_param.ros_send_packet_loss_topic != NULL_TOPIC) {
-    driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendPacketLoss, this, std::placeholders::_1, std::placeholders::_2));
-  }
-  if (driver_param.input_param.source_type == DATA_FROM_LIDAR) {
-    if (driver_param.input_param.ros_send_correction_topic != NULL_TOPIC) {
-      driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendCorrection, this, std::placeholders::_1));
-    }
-    if (driver_param.input_param.ros_send_ptp_topic != NULL_TOPIC) {
-      driver_ptr_->RegRecvCallback(std::bind(&SourceDriver::SendPTP, this, std::placeholders::_1, std::placeholders::_2));
-    }
-  } 
-  if (!driver_ptr_->Init(driver_param))
-  {
-    std::cout << "Driver Initialize Error...." << std::endl;
-    exit(-1);
-  }
-}
+#ROS#
+#Catkin#
+if($ENV{ROS_VERSION} MATCHES "1")
+  find_package(roscpp 1.12 QUIET)
+  find_package(roslib QUIET)
+  include_directories(${roscpp_INCLUDE_DIRS} ${roslib_INCLUDE_DIRS})
+  set(ROS_LIBS ${roscpp_LIBRARIES} ${roslib_LIBRARIES})
+  add_definitions(-DROS_FOUND)
+  add_definitions(-DRUN_IN_ROS_WORKSPACE)
 
-inline void SourceDriver::Start()
-{
-  driver_ptr_->Start();
-}
+  find_package(catkin REQUIRED COMPONENTS
+    roscpp
+    sensor_msgs
+    std_msgs
+    message_generation
+    roslib)
 
-inline SourceDriver::~SourceDriver()
-{
-  Stop();
-}
+  add_message_files(
+    FILES
+    "UdpPacket.msg"
+    "UdpFrame.msg"
+    "LossPacket.msg"
+    "Ptp.msg"
+    "Firetime.msg"
+  )
 
-inline void SourceDriver::Stop()
-{
-  driver_ptr_->Stop();
-}
+  generate_messages(
+    DEPENDENCIES
+    std_msgs
+  )
 
-inline void SourceDriver::SendPacket(const UdpFrame_t& msg, double timestamp)
-{
-  pkt_pub_->publish(ToRosMsg(msg, timestamp));
-}
 
-inline void SourceDriver::SendPointCloud(const LidarDecodedFrame<LidarPointXYZIRT>& msg)
-{
-  auto out_cloud = ToRosMsg(msg, frame_id_);
-  pub_->publish(std::move(out_cloud)); 
-}
+  catkin_package(CATKIN_DEPENDS 
+    sensor_msgs 
+    roslib)
 
-inline void SourceDriver::SendCorrection(const u8Array_t& msg)
-{
-  crt_pub_->publish(ToRosMsg(msg));
-}
+endif($ENV{ROS_VERSION} MATCHES "1")
 
-inline void SourceDriver::SendPacketLoss(const uint32_t& total_packet_count, const uint32_t& total_packet_loss_count)
-{
-  loss_pub_->publish(ToRosMsg(total_packet_count, total_packet_loss_count));
-}
+#ROS2#
+if($ENV{ROS_VERSION} MATCHES "2")
 
-inline void SourceDriver::SendPTP(const uint8_t& ptp_lock_offset, const u8Array_t& ptp_status)
-{
-  ptp_pub_->publish(ToRosMsg(ptp_lock_offset, ptp_status));
-}
+  find_package(rclcpp QUIET)
+  if(rclcpp_FOUND)
 
-inline void SourceDriver::SendImuConfig(const LidarImuData& msg)
-{
-  imu_pub_->publish(ToRosMsg(msg));
-}
+    message(=============================================================)
+    message("-- ROS2 Found. ROS2 Support is turned On.")
+    message(=============================================================)
 
-inline void SourceDriver::SendPacketOneByOne(const UdpPacket& msg, double timestamp)
-{
-  every_pkt_pub_->publish(ToRosMsg(msg, timestamp));
-}
-inline std::unique_ptr<sensor_msgs::msg::PointCloud2> SourceDriver::ToRosMsg(const LidarDecodedFrame<LidarPointXYZIRT>& frame, const std::string& frame_id)
-{
-  auto ros_msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
-  uint32_t points_number = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.points_num : frame.multi_points_num;
-  uint32_t packet_number = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.packet_num : frame.multi_packet_num;
-  LidarPointXYZIRT *pPoints = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.points : frame.multi_points;
-  int frame_index = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_index : frame.multi_frame_index;
-  double frame_start_timestamp = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_start_timestamp : frame.multi_frame_start_timestamp;
-  double frame_end_timestamp = (frame.fParam.IsMultiFrameFrequency() == 0) ? frame.frame_end_timestamp : frame.multi_frame_end_timestamp;
-  const char *prefix = (frame.fParam.IsMultiFrameFrequency() == 0) ? "raw" : "multi";
-  int fields = 6;
-  ros_msg->fields.clear();
-  ros_msg->fields.reserve(fields);
-  ros_msg->width = points_number; 
-  ros_msg->height = 1; 
+    add_definitions(-DROS2_FOUND)
+    include_directories(${rclcpp_INCLUDE_DIRS})
 
-  int offset = 0;
-  offset = addPointField(*ros_msg, "x", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(*ros_msg, "y", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(*ros_msg, "z", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(*ros_msg, "intensity", 1, sensor_msgs::msg::PointField::FLOAT32, offset);
-  offset = addPointField(*ros_msg, "ring", 1, sensor_msgs::msg::PointField::UINT16, offset);
-  offset = addPointField(*ros_msg, "timestamp", 1, sensor_msgs::msg::PointField::FLOAT64, offset);
+    find_package(ament_cmake REQUIRED)
+    find_package(sensor_msgs REQUIRED)
+    find_package(std_msgs REQUIRED)  
+    find_package(rcutils REQUIRED)
+    find_package(rcl_interfaces REQUIRED)
+    find_package(rclcpp_action REQUIRED)
+    find_package(rosidl_typesupport_c REQUIRED) 
+    find_package(rosidl_default_generators REQUIRED)
+    find_package(builtin_interfaces REQUIRED)
+    find_package(std_msgs REQUIRED)
+    
+    rosidl_generate_interfaces(${PROJECT_NAME}
+      "msg/msg_ros2/UdpPacket.msg"
+      "msg/msg_ros2/UdpFrame.msg"
+      "msg/msg_ros2/Firetime.msg"
+      "msg/msg_ros2/Ptp.msg"
+      "msg/msg_ros2/LossPacket.msg"
+      DEPENDENCIES builtin_interfaces std_msgs
+    )
+    ament_export_dependencies(rosidl_default_runtime)                 
+    
+  else(rclcpp_FOUND)
 
-  ros_msg->point_step = offset;
-  ros_msg->row_step = ros_msg->width * ros_msg->point_step;
-  ros_msg->is_dense = false;
-  ros_msg->data.resize(points_number * ros_msg->point_step);
+    message(=============================================================)
+    message("-- ROS2 Not Found. ROS2 Support is turned Off.")
+    message(=============================================================)
 
-  sensor_msgs::PointCloud2Iterator<float> iter_x_(*ros_msg, "x");
-  sensor_msgs::PointCloud2Iterator<float> iter_y_(*ros_msg, "y");
-  sensor_msgs::PointCloud2Iterator<float> iter_z_(*ros_msg, "z");
-  sensor_msgs::PointCloud2Iterator<float> iter_intensity_(*ros_msg, "intensity");
-  sensor_msgs::PointCloud2Iterator<uint16_t> iter_ring_(*ros_msg, "ring");
-  sensor_msgs::PointCloud2Iterator<double> iter_timestamp_(*ros_msg, "timestamp");
-  for (size_t i = 0; i < points_number; i++)
-  {
-    LidarPointXYZIRT point = pPoints[i];
-    *iter_x_ = point.x;
-    *iter_y_ = point.y;
-    *iter_z_ = point.z;
-    *iter_intensity_ = point.intensity;
-    *iter_ring_ = point.ring;
-    *iter_timestamp_ = point.timestamp;
-    ++iter_x_;
-    ++iter_y_;
-    ++iter_z_;
-    ++iter_intensity_;
-    ++iter_ring_;
-    ++iter_timestamp_;   
-  }
-  // printf("HesaiLidar Runing Status [standby mode:%u]  |  [speed:%u]\n", frame.work_mode, frame.spin_speed);
-  printf("%s frame:%d points:%u packet:%d start time:%lf end time:%lf\n", prefix, frame_index, points_number, packet_number, frame_start_timestamp, frame_end_timestamp) ;
-  std::cout.flush();
-  auto sec = (uint64_t)floor(frame_start_timestamp);
-  if (sec <= std::numeric_limits<int32_t>::max()) {
-    ros_msg->header.stamp.sec = (uint32_t)floor(frame_start_timestamp);
-    ros_msg->header.stamp.nanosec = (uint32_t)round((frame_start_timestamp - ros_msg->header.stamp.sec) * 1e9);
-  } else {
-    printf("does not support timestamps greater than 19 January 2038 03:14:07 (now %lf)\n", frame_start_timestamp);
-  }
-  ros_msg->header.frame_id = frame_id_;
-  auto current_time = rclcpp::Clock().now();
-  ros_msg->header.stamp = current_time;
-  auto logger = rclcpp::get_logger("SourceDriver");
-  RCLCPP_INFO(logger, "Publisher heap address: %p", (void*)ros_msg.get());
-  return ros_msg;
-}
+  endif(rclcpp_FOUND )
+endif($ENV{ROS_VERSION} MATCHES "2")
 
-inline hesai_ros_driver::msg::UdpPacket SourceDriver::ToRosMsg(const UdpPacket& ros_msg, double timestamp) {
-  hesai_ros_driver::msg::UdpPacket rawpacket;
-  rawpacket.size = ros_msg.packet_len;
-  rawpacket.data.resize(ros_msg.packet_len);
-  memcpy(&rawpacket.data[0], &ros_msg.buffer[0], ros_msg.packet_len);
-  rawpacket.stamp.sec = (uint32_t)floor(timestamp);
-  rawpacket.stamp.nanosec = (uint32_t)round((timestamp - rawpacket.stamp.sec) * 1e9);
-  return rawpacket;
-}
-inline hesai_ros_driver::msg::UdpFrame SourceDriver::ToRosMsg(const UdpFrame_t& ros_msg, double timestamp) {
-  hesai_ros_driver::msg::UdpFrame rs_msg;
-  for (size_t i = 0 ; i < ros_msg.size(); i++) {
-    hesai_ros_driver::msg::UdpPacket rawpacket;
-    rawpacket.size = ros_msg[i].packet_len;
-    rawpacket.data.resize(ros_msg[i].packet_len);
-    memcpy(&rawpacket.data[0], &ros_msg[i].buffer[0], ros_msg[i].packet_len);
-    rs_msg.packets.push_back(rawpacket);
-  }
-  auto sec = (uint64_t)floor(timestamp);
-  if (sec <= std::numeric_limits<int32_t>::max()) {
-    rs_msg.header.stamp.sec = (uint32_t)floor(timestamp);
-    rs_msg.header.stamp.nanosec = (uint32_t)round((timestamp - rs_msg.header.stamp.sec) * 1e9);
-  } else {
-    printf("does not support timestamps greater than 19 January 2038 03:14:07 (now %lf)\n", timestamp);
-  }
-  rs_msg.header.frame_id = frame_id_;
-  return rs_msg;
-}
 
-inline std_msgs::msg::UInt8MultiArray SourceDriver::ToRosMsg(const u8Array_t& correction_string) {
-  auto msg = std::make_shared<std_msgs::msg::UInt8MultiArray>();
-  msg->data.resize(correction_string.size());
-  std::copy(correction_string.begin(), correction_string.end(), msg->data.begin());
-  return *msg;
-}
+#Others#
+find_package(yaml-cpp REQUIRED)
 
-inline hesai_ros_driver::msg::LossPacket SourceDriver::ToRosMsg(const uint32_t& total_packet_count, const uint32_t& total_packet_loss_count)
-{
-  hesai_ros_driver::msg::LossPacket msg;
-  msg.total_packet_count = total_packet_count;
-  msg.total_packet_loss_count = total_packet_loss_count;  
-  return msg;
-}
+#Include directory#
+include_directories(${PROJECT_SOURCE_DIR}/src)
 
-inline hesai_ros_driver::msg::Ptp SourceDriver::ToRosMsg(const uint8_t& ptp_lock_offset, const u8Array_t& ptp_status)
-{
-  hesai_ros_driver::msg::Ptp msg;
-  msg.ptp_lock_offset = ptp_lock_offset;
-  msg.ptp_status_size = ptp_status.size();
-  msg.ptp_status.resize(ptp_status.size());
-  std::copy(ptp_status.begin(), ptp_status.end(), msg.ptp_status.begin());
-  return msg;
-}
+#Driver core#
+set(DISENABLE_TEST_CC ON CACHE BOOL "DISENABLE_TEST_CC")  
+add_subdirectory(src/driver/HesaiLidar_SDK_2.0)
 
-inline hesai_ros_driver::msg::Firetime SourceDriver::ToRosMsg(const double *firetime_correction_)
-{
-  hesai_ros_driver::msg::Firetime msg;
-  std::copy(firetime_correction_, firetime_correction_ + 512, msg.data.begin());
-  return msg;
-}
+#========================
+# Build Setup
+#========================
 
-inline sensor_msgs::msg::Imu SourceDriver::ToRosMsg(const LidarImuData &imu_config_)
-{
-  sensor_msgs::msg::Imu ros_msg;
-  auto sec = (uint64_t)floor(imu_config_.timestamp);
-  if (sec <= std::numeric_limits<int32_t>::max()) {
-    ros_msg.header.stamp.sec = (uint32_t)floor(imu_config_.timestamp);
-    ros_msg.header.stamp.nanosec = (uint32_t)round((imu_config_.timestamp - ros_msg.header.stamp.sec) * 1e9);
-  } else {
-    printf("does not support timestamps greater than 19 January 2038 03:14:07 (now %lf)\n", imu_config_.timestamp);
-  }
-  ros_msg.header.frame_id = frame_id_;
-  ros_msg.linear_acceleration.x = (imu_config_.imu_accel_x);
-  ros_msg.linear_acceleration.y = (imu_config_.imu_accel_y);
-  ros_msg.linear_acceleration.z = (imu_config_.imu_accel_z);
-  ros_msg.angular_velocity.x = (imu_config_.imu_ang_vel_x);
-  ros_msg.angular_velocity.y = (imu_config_.imu_ang_vel_y);
-  ros_msg.angular_velocity.z = (imu_config_.imu_ang_vel_z);
-  return ros_msg;
-}
+find_package(Boost REQUIRED COMPONENTS thread)
+include_directories(${Boost_INCLUDE_DIRS})
+link_directories(${Boost_LIBRARY_DIRS})
 
-inline void SourceDriver::ReceivePacket(const hesai_ros_driver::msg::UdpFrame::SharedPtr msg)
-{
-  for (size_t i = 0; i < msg->packets.size(); i++) {
-    if(driver_ptr_->lidar_ptr_->origin_packets_buffer_.full()) std::this_thread::sleep_for(std::chrono::microseconds(10000));
-    driver_ptr_->lidar_ptr_->origin_packets_buffer_.emplace_back(&msg->packets[i].data[0], msg->packets[i].size);
-  }
-}
+set(LIB_TARGETS 
+    hesai_sdk_lib
+    log_lib
+    lidar_lib
+    ptcClient_lib
+    source_lib
+    platutils_lib
+    serialClient_lib
+    udpParser_lib
+    )
 
-inline void SourceDriver::ReceiveCorrection(const std_msgs::msg::UInt8MultiArray::SharedPtr msg)
-{
-  driver_ptr_->lidar_ptr_->correction_string_.resize(msg->data.size());
-  std::copy(msg->data.begin(), msg->data.end(), driver_ptr_->lidar_ptr_->correction_string_.begin());
-  while (1) {
-    if (! driver_ptr_->lidar_ptr_->LoadCorrectionFromROSbag()) {
-      break;
-    }
-  }
-}
+set(INSTALLABLE_LIB_TARGETS
+    log_lib
+    ptcClient_lib
+    source_lib
+    platutils_lib
+    serialClient_lib
+    )
 
-// inline double SourceDriver::From_g_To_ms2(double g)
-// {
-//   return g * 9.80665;
-// }
+if(${CUDA_FOUND})
+  add_executable(hesai_ros_driver_node
+    node/hesai_ros_driver_node.cu
+    src/manager/node_manager.cc
+    )
+  set(LIB_TARGETS
+    ${LIB_TARGETS}
+    udpParserGpu_lib
+    )
+  set(INSTALLABLE_LIB_TARGETS
+    ${INSTALLABLE_LIB_TARGETS}
+    udpParserGpu_lib
+    )
+else()
+  add_executable(hesai_ros_driver_node
+    node/hesai_ros_driver_node.cc
+    src/manager/node_manager.cc
+    )
+endif()
+target_link_libraries(hesai_ros_driver_node                   
+            ${YAML_CPP_LIBRARIES}
+            ${Boost_LIBRARIES}
+            ${LIB_TARGETS}
+)              
 
-// inline double SourceDriver::From_degs_To_rads(double degree)
-// {
-//   return degree * M_PI / 180.0;
-// }
+target_include_directories(hesai_ros_driver_node PRIVATE
+  src/manager
+  src/msg/ros_msg
+  src/msg/rs_msg
+  src/utility
+  ${CMAKE_CURRENT_BINARY_DIR}
+)  
 
+#Ros#
+if($ENV{ROS_VERSION} MATCHES "1")
+  target_link_libraries(hesai_ros_driver_node  ${ROS_LIBS})
+  # Catkin's install() only allows targets declared in this CMakeLists.txt.
+  # SDK targets (log_lib, etc.) are added in add_subdirectory and must not be
+  # listed here; they are already linked into hesai_ros_driver_node.
+  install(TARGETS hesai_ros_driver_node
+          RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+          LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+          ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION})
+  install(DIRECTORY
+          launch
+          rviz
+          config
+          DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+endif($ENV{ROS_VERSION} MATCHES "1")
+
+
+#Ros2#
+
+if($ENV{ROS_VERSION} MATCHES "2")
+  find_package(ament_index_cpp REQUIRED)
+  if(COMMAND ament_target_dependencies)
+    ament_target_dependencies(hesai_ros_driver_node 
+    "ament_index_cpp"
+    "rcl_interfaces"
+    "rclcpp" 
+    "rcutils"
+    "std_msgs" 
+    "sensor_msgs"
+    "rclcpp_action"
+    # "tf2_geometry_msgs"
+    )
+  else()
+    set(ROS2_TARGET_DEPENDENCIES
+      ament_index_cpp
+      rcl_interfaces
+      rclcpp
+      rcutils
+      std_msgs
+      sensor_msgs
+      rclcpp_action
+    )
+    foreach(dependency IN LISTS ROS2_TARGET_DEPENDENCIES)
+      if(DEFINED ${dependency}_TARGETS AND NOT "${${dependency}_TARGETS}" STREQUAL "")
+        target_link_libraries(hesai_ros_driver_node ${${dependency}_TARGETS})
+      elseif(TARGET ${dependency}::${dependency})
+        target_link_libraries(hesai_ros_driver_node ${dependency}::${dependency})
+      elseif(DEFINED ${dependency}_LIBRARIES AND NOT "${${dependency}_LIBRARIES}" STREQUAL "")
+        target_link_libraries(hesai_ros_driver_node ${${dependency}_LIBRARIES})
+      endif()
+
+      if(DEFINED ${dependency}_INCLUDE_DIRS AND NOT "${${dependency}_INCLUDE_DIRS}" STREQUAL "")
+        target_include_directories(hesai_ros_driver_node PUBLIC ${${dependency}_INCLUDE_DIRS})
+      endif()
+    endforeach()
+  endif()
+
+  if(COMMAND rosidl_get_typesupport_target)
+    rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
+    target_link_libraries(hesai_ros_driver_node "${cpp_typesupport_target}")
+  else()
+    rosidl_target_interfaces(hesai_ros_driver_node  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  endif()
+
+  install(TARGETS
+          hesai_ros_driver_node
+          DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS
+          ${INSTALLABLE_LIB_TARGETS}
+          DESTINATION lib)
+
+  install(DIRECTORY
+          launch
+          rviz
+          config
+          DESTINATION share/${PROJECT_NAME})
+
+  ament_package()
+
+endif($ENV{ROS_VERSION} MATCHES "2")
