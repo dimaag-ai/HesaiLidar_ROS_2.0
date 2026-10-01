@@ -42,7 +42,7 @@ class NodeManager
 public:
 
   // Initialize ROS nodes based on configuration files
-  void Init(const YAML::Node& config);
+  void Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> node = nullptr);
   // Start working
   void Start();
   // Stop working

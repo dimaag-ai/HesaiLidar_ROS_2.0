@@ -29,7 +29,7 @@
  */
 
 #include "manager/node_manager.h"
-void NodeManager::Init(const YAML::Node& config)
+void NodeManager::Init(const YAML::Node& config, std::shared_ptr<rclcpp::Node> node)
 {
   YAML::Node lidar_config = YamlSubNodeAbort(config, "lidar");
   for (uint8_t i = 0; i < lidar_config.size(); ++i)
