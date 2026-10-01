@@ -14,24 +14,29 @@ configure_file(
 )
 
 set(WITH_PTCS_USE ON CACHE BOOL "Use Ptcs")
-# set(FIND_CUDA ON CACHE BOOL "Find CUDA")
+set(FIND_CUDA ON CACHE BOOL "Find CUDA" FORCE) # Force this to ON
 
 if(FIND_CUDA)
-    find_package(CUDA )
+    find_package(CUDA REQUIRED) # Force error if CUDA isn't found
 endif()
-if(${CUDA_FOUND})
-  	project(CommonModules LANGUAGES CXX CUDA)
-	set(CUDA_SOURCE_PROPERTY_FORMAT OBJ)
-	set(CUDA_SEPARABLE_COMPILATION ON)
-	include_directories(${CUDA_INCLUDE_DIRS})
-	set(CUDA_PROPAGATE_HOST_FLAGS OFF)
-	set(CUDA_NVCC_FLAGS -arch=sm_61;-O3;-G;-g;)#根据具体GPU性能更改算力参数
-	link_directories($ENV{CUDA_PATH}/lib/x64)
 
-  add_definitions(-DUSE_CUDA)
-  set(FIND_CUDA ON CACHE BOOL "Use Cuda")
+if(${CUDA_FOUND})
+    project(CommonModules LANGUAGES CXX CUDA)
+    set(CUDA_SOURCE_PROPERTY_FORMAT OBJ)
+    set(CUDA_SEPARABLE_COMPILATION ON)
+    include_directories(${CUDA_INCLUDE_DIRS})
+    set(CUDA_PROPAGATE_HOST_FLAGS OFF)
+    
+    # CHANGED: Updated from sm_61 to sm_87 for Jetson Orin (Ampere)
+    set(CUDA_NVCC_FLAGS -arch=sm_87;-O3;-G;-g;)
+    
+    # Fix library pathing for ARM64 Linux systems (Jetson)
+    link_directories(/usr/local/cuda/lib64)
+
+    add_definitions(-DUSE_CUDA)
+    message(STATUS "CUDA found successfully! Building with Orin sm_87 optimization.")
 else(${CUDA_FOUND})
-	MESSAGE(STATUS "cuda not found!")
+    message(FATAL_ERROR "CUDA not found! Cannot build with use_gpu=true.")
 endif(${CUDA_FOUND})
 
 #=======================================
@@ -253,7 +258,76 @@ endif($ENV{ROS_VERSION} MATCHES "1")
 #Ros2#
 
 if($ENV{ROS_VERSION} MATCHES "2")
+  # Find ROS 2 components for composable node support
+  find_package(rclcpp_components REQUIRED)
   find_package(ament_index_cpp REQUIRED)
+
+  # ========================================
+  # Composable Node Support (ROS 2 only)
+  # ========================================
+  # Create a shared library for the composable node
+  # Supports CUDA acceleration when available and multiple lidars
+
+  # Create the composable node library
+  add_library(hesai_composable_driver_lib
+      node/composable/composable_hesai_driver.cpp
+      src/manager/node_manager.cc
+  )
+
+  # Get the message typesupport target for custom messages
+  rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
+
+  # Set include directories for the composable library
+  target_include_directories(hesai_composable_driver_lib PRIVATE
+      src/manager
+      src/msg/ros_msg
+      src/msg/rs_msg
+      src/utility
+      ${CMAKE_CURRENT_BINARY_DIR}
+      ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp  # Generated message headers
+  )
+
+  # Link required libraries (including CUDA libs if available and message typesupport)
+  target_link_libraries(hesai_composable_driver_lib
+      ${YAML_CPP_LIBRARIES}
+      ${Boost_LIBRARIES}
+      ${LIB_TARGETS}
+      "${cpp_typesupport_target}"
+  )
+
+  # Set ROS 2 dependencies for the composable library
+  ament_target_dependencies(hesai_composable_driver_lib
+      "ament_index_cpp"
+      "rcl_interfaces"
+      "rclcpp"
+      "rclcpp_components"
+      "rcutils"
+      "std_msgs"
+      "sensor_msgs"
+      "rclcpp_action"
+  )
+
+  # Register the composable node executable from the library
+  # This creates an executable that can be loaded by the component container
+  # Signature: rclcpp_components_register_node(TARGET PLUGIN <component> EXECUTABLE <node>)
+  rclcpp_components_register_node(
+      hesai_composable_driver_lib
+      PLUGIN ComposableHesaiDriver
+      EXECUTABLE hesai_composable_driver_node_composable
+  )
+
+  # Install the library
+  install(TARGETS hesai_composable_driver_lib
+      ARCHIVE DESTINATION lib
+      LIBRARY DESTINATION lib
+      RUNTIME DESTINATION bin
+  )
+
+  # Install the composable executable
+  install(TARGETS hesai_composable_driver_node_composable
+      DESTINATION bin
+  )
+
   if(COMMAND ament_target_dependencies)
     ament_target_dependencies(hesai_ros_driver_node 
     "ament_index_cpp"
